@@ -1,0 +1,96 @@
+#include <Wire.h>
+#include <MPU9250.h>
+#include <BleMouse.h>
+
+MPU9250 mpu;
+BleMouse bleMouse("Wireless Air Mouse with ESP32", "StayLing", 100);
+
+float gyroX, gyroY;
+float sensitivity = 1.2;
+float threshold = 1.5;  
+float driftX = 0, driftY = 0;  
+float smoothX = 0, smoothY = 0;  
+float alpha = 0.3;  // Düşük geçiren filtre ağırlığı
+float driftCorrectionRate = 0.0001;  // Dinamik drift düzeltme oranı
+unsigned long lastMovementTime = 0;  
+
+void calibrateDrift() {
+    Serial.println("🔧 Jiroskop drift kalibrasyonu yapılıyor...");
+    float sumX = 0, sumY = 0;
+    int samples = 500;
+
+    for (int i = 0; i < samples; i++) {
+        mpu.update();
+        sumX += mpu.getGyroX();
+        sumY += mpu.getGyroY();
+        delay(2);
+    }
+
+    driftX = sumX / samples;
+    driftY = sumY / samples;
+    Serial.printf("✅ Drift düzeltmesi tamamlandı! DriftX: %.5f | DriftY: %.5f\n", driftX, driftY);
+}
+
+void setup() {
+    Serial.begin(115200);
+    Wire.begin();
+
+    Serial.println("🔄 MPU9250 başlatılıyor...");
+    if (!mpu.setup(0x68)) {
+        Serial.println("❌ MPU9250 bulunamadı!");
+        while (1);
+    }
+
+    Serial.println("✅ MPU9250 çalışıyor. Kalibrasyon yapılıyor...");
+    mpu.calibrateAccelGyro();
+    calibrateDrift();
+
+    Serial.println("🔄 Bluetooth Mouse başlatılıyor...");
+    bleMouse.begin();
+    
+    delay(2000);
+    if (bleMouse.isConnected()) {
+        Serial.println("✅ Bluetooth Mouse bağlandı!");
+    } else {
+        Serial.println("❌ Bluetooth bağlanamadı, cihazı tarayın.");
+    }
+}
+
+void loop() {
+    if (!bleMouse.isConnected()) {
+        Serial.println("🔴 Bluetooth bağlantısı kesildi! Yeniden bağlanmasını bekliyorum...");
+        delay(3000);
+        return;
+    }
+
+    if (mpu.update()) {
+        // Drift düzeltmesi uygula
+        float rawX = mpu.getGyroX() - driftX;
+        float rawY = mpu.getGyroY() - driftY;
+
+        // Düşük geçiren filtre uygulayarak hareketleri yumuşat
+        smoothX = alpha * rawX + (1 - alpha) * smoothX;
+        smoothY = alpha * rawY + (1 - alpha) * smoothY;
+
+        // Hassasiyet ve eşik değerleri uygula
+        if (abs(smoothX) < threshold) smoothX = 0;
+        if (abs(smoothY) < threshold) smoothY = 0;
+
+        int moveX = smoothX * (sensitivity * 0.5);  // X ekseni daha hassas
+        int moveY = -smoothY * (sensitivity * 0.3); // Y ekseni daha az hassas
+
+        // Eğer mouse hareket etmiyorsa drift düzeltmesini dinamik olarak uygula
+        if (moveX == 0 && moveY == 0) {
+            driftX *= (1 - driftCorrectionRate);
+            driftY *= (1 - driftCorrectionRate);
+        } else {
+            lastMovementTime = millis();  
+        }
+
+        // Mouse hareket ettir
+        bleMouse.move(moveX, moveY);
+        Serial.printf("🔵 Gyro X: %.2f | Gyro Y: %.2f ==> Mouse X: %d | Mouse Y: %d\n", smoothX, smoothY, moveX, moveY);
+    }
+
+    delay(5);  
+}
